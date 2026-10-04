@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.pagerender/pagerender",
+  "description": "Check what search and AI crawlers extract from any public URL. Nine read-only tools, five of which need no token. Three of those run locally and never call an API.",
+  "repository": {
+    "url": "https://github.com/nmbrthirteen/pagerender-tools",
+    "source": "github"
+  },
+  "version": "1.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@pagerender/mcp",
+      "version": "1.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PAGERENDER_TOKEN",
+          "description": "A read-only Pagerender API key. Five of the nine tools work without it, and three of those make no network call to Pagerender at all.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

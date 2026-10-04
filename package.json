@@ -1,0 +1,15 @@
+{
+  "name": "pagerender-tools",
+  "private": true,
+  "description": "The open source Pagerender tools: the HTML analyzer, the CLI and the MCP server",
+  "license": "MIT",
+  "workspaces": [
+    "packages/analyze-core",
+    "packages/cli",
+    "packages/mcp"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/analyze-core && npm run build -w packages/cli && npm run build -w packages/mcp",
+    "test": "bun test"
+  }
+}

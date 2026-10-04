@@ -1,0 +1,64 @@
+{
+  "name": "@pagerender/mcp",
+  "version": "1.2.0",
+  "description": "MCP server for the Pagerender API: analyze a URL, verify an integration, read render stats, check service health, list plans",
+  "keywords": [
+    "pagerender",
+    "prerender",
+    "seo",
+    "mcp",
+    "model-context-protocol",
+    "crawler",
+    "rendering"
+  ],
+  "license": "MIT",
+  "homepage": "https://pagerender.io/mcp-server",
+  "bugs": {
+    "url": "https://pagerender.io/contact"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pagerender-mcp": "dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "server.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@pagerender/cli": "^1.2.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nmbrthirteen/pagerender-tools.git",
+    "directory": "packages/mcp"
+  },
+  "mcpName": "io.pagerender/pagerender"
+}

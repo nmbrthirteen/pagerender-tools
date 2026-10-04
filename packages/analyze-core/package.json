@@ -1,0 +1,53 @@
+{
+  "name": "@pagerender/analyze",
+  "version": "1.0.0",
+  "description": "What a search crawler extracts from an HTML string: title, canonical, word count, crawlable links, and whether the page is an empty app shell",
+  "keywords": [
+    "pagerender",
+    "seo",
+    "crawler",
+    "googlebot",
+    "html",
+    "prerender",
+    "app-shell"
+  ],
+  "license": "MIT",
+  "homepage": "https://pagerender.io/mcp-server",
+  "bugs": {
+    "url": "https://pagerender.io/contact"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nmbrthirteen/pagerender-tools.git",
+    "directory": "packages/analyze-core"
+  }
+}
