@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import {
   agentsDisallowedSitewide,
   AI_CRAWLER_AGENTS,
@@ -54,19 +55,7 @@ function isGzip(url: string, contentType: string | null): boolean {
 }
 
 async function readBody(response: Response, url: string): Promise<string> {
-  const raw = response.body as ReadableStream<Uint8Array>;
-  // fetch does not decompress a body the server labelled as a gzip file rather
-  // than a gzip transfer encoding, which is how most large sitemaps are served.
-  const body = isGzip(url, response.headers.get('content-type'))
-    ? (raw.pipeThrough(
-        new DecompressionStream('gzip') as unknown as ReadableWritablePair<
-          Uint8Array,
-          Uint8Array
-        >,
-      ) as ReadableStream<Uint8Array>)
-    : raw;
-
-  const reader = body.getReader();
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   for (;;) {
@@ -86,7 +75,16 @@ async function readBody(response: Response, url: string): Promise<string> {
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(joined.slice(0, MAX_HTML_BYTES));
+
+  // fetch does not decompress a body the server labelled as a gzip file rather
+  // than a gzip transfer encoding, which is how most large sitemaps are served.
+  // node:zlib rather than DecompressionStream: the stream API is not uniform
+  // across the runtimes this package supports, and zlib is.
+  const bytes = isGzip(url, response.headers.get('content-type'))
+    ? new Uint8Array(gunzipSync(joined))
+    : joined;
+
+  return new TextDecoder().decode(bytes.slice(0, MAX_HTML_BYTES));
 }
 
 async function get(
