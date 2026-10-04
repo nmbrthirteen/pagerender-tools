@@ -499,8 +499,6 @@ describe('the commands that need no token', () => {
       else process.env.PAGERENDER_TOKEN = saved;
     }
 
-    // The whole point: every request went to the site being checked, and none
-    // of them went to us.
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.filter((url) => url.includes('pagerender.io'))).toEqual([]);
     expect(seen.some((url) => url.endsWith('/robots.txt'))).toBe(true);

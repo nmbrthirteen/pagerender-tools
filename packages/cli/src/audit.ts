@@ -25,9 +25,9 @@ export interface AuditPage extends Partial<Omit<HtmlAnalysis, 'links'>> {
   finalUrl: string | null;
   status: number | null;
   ok: boolean;
-  /** True when Googlebot got a 4xx and a browser user agent did not. */
+
   crawlerBlocked: boolean;
-  /** Only populated when auditUrl is asked to keep them. */
+
   links?: string[];
   error?: string;
 }
@@ -76,10 +76,6 @@ async function readBody(response: Response, url: string): Promise<string> {
     offset += chunk.byteLength;
   }
 
-  // fetch does not decompress a body the server labelled as a gzip file rather
-  // than a gzip transfer encoding, which is how most large sitemaps are served.
-  // node:zlib rather than DecompressionStream: the stream API is not uniform
-  // across the runtimes this package supports, and zlib is.
   const bytes = isGzip(url, response.headers.get('content-type'))
     ? new Uint8Array(gunzipSync(joined))
     : joined;
@@ -120,8 +116,6 @@ async function fetchPage(url: string, fetchImpl: typeof fetch): Promise<FetchedP
     };
   }
 
-  // The site refused Googlebot. Retry as a browser: if that succeeds, the
-  // finding is the block itself, which is the most useful row in the report.
   const retry = await get(url, BROWSER_UA, 'text/html', fetchImpl);
   return {
     finalUrl: retry.finalUrl,
@@ -171,7 +165,6 @@ export async function auditUrl(
   }
 }
 
-/** Reads <loc> entries, and reports whether the document was a sitemap index. */
 export function parseSitemap(xml: string): { urls: string[]; isIndex: boolean } {
   const urls = Array.from(xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)).map((m) => m[1]);
   return { urls, isIndex: /<sitemapindex[\s>]/i.test(xml) };
@@ -191,8 +184,6 @@ export async function urlsFromSitemap(
   const root = await load(sitemapUrl);
   if (!root.isIndex) return root.urls.slice(0, limit);
 
-  // One level only. A sitemap index of sitemap indexes is not a shape worth
-  // chasing, and the limit stops the fan-out either way.
   const collected: string[] = [];
   for (const child of root.urls) {
     if (collected.length >= limit) break;
@@ -200,7 +191,7 @@ export async function urlsFromSitemap(
       const { urls } = await load(child);
       collected.push(...urls);
     } catch {
-      // A broken child sitemap should not take the whole audit down.
+
     }
   }
   return collected.slice(0, limit);
@@ -253,7 +244,6 @@ export async function audit(
 
 const VERDICT_RANK: Record<Verdict, number> = { poor: 0, partial: 1, good: 2 };
 
-/** True when any page is at or below the threshold, or failed to load. */
 export function failsThreshold(report: AuditReport, threshold: Verdict): boolean {
   return report.pages.some(
     (page) =>
@@ -287,10 +277,6 @@ export function formatTable(report: AuditReport): string {
     `${total} pages: ${good} good, ${partial} partial, ${poor} poor, ${failed} failed`,
   ].join('\n');
 }
-
-// Everything below runs on the caller's machine and makes no request to the
-// Pagerender API. That is deliberate: the tools that need no account must also
-// cost nothing to serve, or "free" is only free for the person using it.
 
 export interface SitePage {
   url: string;
@@ -349,7 +335,6 @@ export function normalizeHost(raw: string): string | null {
   }
 }
 
-/** Reads robots.txt over https, then http. A 404 means fetched and empty. */
 export async function fetchRobots(
   host: string,
   fetchImpl: typeof fetch,

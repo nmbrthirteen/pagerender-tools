@@ -1,16 +1,6 @@
-/**
- * What a search crawler extracts from an HTML string.
- *
- * This is the parser behind Pagerender's crawler checks, published on its own
- * so the same verdict can be produced on a server, in a CLI, or in a browser.
- * It does no network work and has no dependencies.
- */
-
-/** The user agent Pagerender fetches with when it wants a crawler's view. */
 export const GOOGLEBOT_UA =
   'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
 
-/** The fallback for a site whose bot protection answers a crawler with a 4xx. */
 export const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
@@ -18,10 +8,6 @@ export const ANALYZE_TIMEOUT_MS = 12_000;
 export const MAX_REDIRECTS = 3;
 export const MAX_HTML_BYTES = 2 * 1024 * 1024;
 
-/**
- * Root elements that frameworks mount into. Finding one of these next to
- * almost no text is what distinguishes an empty app shell from a short page.
- */
 export const APP_SHELL_MARKERS = [
   'id="root"',
   'id="__next"',
@@ -49,7 +35,7 @@ export interface HtmlAnalysis {
   iframeCount: number;
   appShell: boolean;
   verdict: Verdict;
-  /** Every href that a crawler would follow, unresolved. */
+
   links: string[];
 }
 
@@ -58,11 +44,6 @@ function extractTag(html: string, regex: RegExp): string | null {
   return match ? match[1].trim() : null;
 }
 
-/**
- * The visible text of an HTML fragment, as a browser would render it.
- * Differs from a whole-document word count: script, style, noscript and
- * template contents are not text a reader or a crawler sees.
- */
 export function stripTags(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -82,14 +63,13 @@ export function countBodyWords(html: string): number {
   return text ? text.split(' ').length : 0;
 }
 
-/** Resolves hrefs against the page they were found on, dropping malformed ones. */
 export function resolveLinks(hrefs: readonly string[], base: string): string[] {
   const resolved: string[] = [];
   for (const href of hrefs) {
     try {
       resolved.push(new URL(href, base).toString());
     } catch {
-      // Malformed href from the page markup; skip rather than guess.
+
     }
   }
   return resolved;

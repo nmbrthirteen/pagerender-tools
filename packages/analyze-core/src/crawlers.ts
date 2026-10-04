@@ -1,13 +1,3 @@
-/**
- * The AI crawlers Pagerender tracks, in one place.
- *
- * The list lives here, in the package that does the parsing, because the CLI
- * and the MCP server answer "which AI crawlers does this site block" on the
- * user's own machine with no call to any API. Pagerender's own services import
- * it from here too, so there is one source rather than two that drift.
- */
-
-/** Crawlers that fetch a page to answer a question right now. */
 export const AI_ANSWER_AGENTS = [
   'oai-searchbot',
   'chatgpt-user',
@@ -23,7 +13,6 @@ export const AI_ANSWER_AGENTS = [
   'youbot',
 ] as const;
 
-/** Crawlers that collect pages to train on. */
 export const AI_TRAINING_AGENTS = [
   'gptbot',
   'claudebot',

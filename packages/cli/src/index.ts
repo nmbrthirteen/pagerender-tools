@@ -207,10 +207,6 @@ export class PagerenderClient {
     });
   }
 
-  // The indexing routes key everything off a domainId, but a caller only has
-  // the URL or hostname in hand. There is no "resolve by host" endpoint, so
-  // this fetches the account's connected domains and matches the same way
-  // the API itself does (exact host, or a subdomain of it).
   private async resolveDomain(host: string): Promise<{ id: string; domain: string } | null> {
     const { domains } = await this.request<{ domains: Array<{ id: string; domain: string }> }>(
       'GET',

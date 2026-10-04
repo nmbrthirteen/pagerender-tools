@@ -109,9 +109,6 @@ describe('resolveLinks', () => {
   });
 });
 
-// These two pages were fetched as Googlebot on 2026-10-04 and are the values
-// the API produced before analyzeHtml moved into this package. They are the
-// safety net for the move; if one changes, the parser changed.
 describe('real pages, pinned', () => {
   test('the Pagerender home page reads as a rendered page', () => {
     const result = analyzeHtml(fixture('pagerender-home.html'));

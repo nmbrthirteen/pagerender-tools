@@ -135,8 +135,6 @@ Reference
 
 const NEEDS_TOKEN = new Set(['render', 'verify', 'purge', 'warmup', 'stats', 'index', 'index-status']);
 
-// Exported so a test can pin the set. Every command outside it works with no
-// account, which is the whole pitch of the published package.
 export const NEEDS_TOKEN_COMMANDS = [...NEEDS_TOKEN].sort();
 
 function reportRateLimit(limit: RateLimit): void {
@@ -202,8 +200,7 @@ export async function run(argv: readonly string[]): Promise<number> {
 
   try {
     switch (command) {
-      // These three run here, not on the API. No token, no account, no rate
-      // limit, and nothing for us to pay for.
+
       case 'analyze':
         return print(await auditUrl(requireUrl(), fetch));
       case 'analyze-site':

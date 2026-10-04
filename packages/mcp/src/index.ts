@@ -17,24 +17,12 @@ export { PagerenderError };
 export const TOKEN_ENV_VAR = 'PAGERENDER_TOKEN';
 export const API_URL_ENV_VAR = 'PAGERENDER_API_URL';
 
-// package.json sits one directory up from both src/ (dev, via bun) and dist/
-// (built), so this stays the single source of truth for the advertised
-// server version instead of a second hardcoded string. Read lazily inside
-// createServer, not at module load: a missing or unreadable package.json
-// should fail through bin.ts's startup error path, not as an uncaught
-// exception while the module is still being imported.
 function packageVersion(): string {
   return (
     JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { version: string }
   ).version;
 }
 
-/**
- * The full tool allowlist. Deliberately nine, deliberately read only.
- * `render`, `purge` and `warmup` spend or change a customer's account and stay
- * out of an agent's reach. `index_status` and `indexing_overview` read what
- * the indexing agent already did; neither one can make it submit a URL.
- */
 export const TOOL_NAMES = [
   'analyze_url',
   'analyze_site',
@@ -85,10 +73,6 @@ function tokenMissingMessage(toolName: string): string {
   return `${toolName} needs a token. Set ${TOKEN_ENV_VAR} to a Pagerender API key before starting this server. A read-only key is sufficient.`;
 }
 
-/**
- * Builds the Pagerender MCP server. One PagerenderClient is constructed and
- * reused across every tool call.
- */
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const token = options.token ?? process.env[TOKEN_ENV_VAR];
   const apiUrl = options.apiUrl ?? process.env[API_URL_ENV_VAR] ?? DEFAULT_API_URL;
@@ -97,10 +81,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     apiUrl,
     fetchImpl: options.fetchImpl,
   });
-  // The three tools that need no token fetch the target site directly instead
-  // of going through the Pagerender API. This server already runs on the
-  // user's machine, so routing those through us would spend our bandwidth and
-  // our database on work the caller can do locally for nothing.
+
   const fetchImpl = options.fetchImpl ?? fetch;
 
   const server = new McpServer({ name: 'pagerender', version: packageVersion() });

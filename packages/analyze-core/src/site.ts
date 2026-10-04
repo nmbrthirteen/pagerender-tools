@@ -2,13 +2,6 @@ import { isStaticFile } from './crawlers.js';
 
 export const SITE_MAX_PAGES = 7;
 
-/**
- * Picks pages to sample from a home page's own links.
- *
- * One page per top-level path segment first, so a report covers the shape of
- * the site rather than seven posts from the same blog, then fills the rest in
- * document order.
- */
 export function pickSitePages(
   links: readonly string[],
   baseUrl: string,
