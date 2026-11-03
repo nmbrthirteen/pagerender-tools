@@ -18,7 +18,9 @@ export const APP_SHELL_MARKERS = [
 ] as const;
 
 export * from './crawlers.js';
+
 export * from './robots.js';
+
 export * from './site.js';
 
 export type Verdict = 'good' | 'partial' | 'poor';
@@ -39,9 +41,37 @@ export interface HtmlAnalysis {
   links: string[];
 }
 
-function extractTag(html: string, regex: RegExp): string | null {
-  const match = html.match(regex);
-  return match ? match[1].trim() : null;
+function tagAttributes(html: string, tagName: string): Map<string, string>[] {
+  const tags = html.matchAll(
+    new RegExp(`<${tagName}(?=[\\s/>])(?:"[^"]*"|'[^']*'|[^>"'])*>`, 'gi'),
+  );
+
+  return Array.from(tags, ([tag]) => {
+    const attributes = new Map<string, string>();
+    const body = tag.slice(tagName.length + 1);
+
+    for (const match of body.matchAll(
+      /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g,
+    )) {
+      const name = match[1].toLowerCase();
+
+      if (!attributes.has(name)) attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '');
+    }
+
+    return attributes;
+  });
+}
+
+function metaContent(head: string, name: string): string | null {
+  for (const attributes of tagAttributes(head, 'meta')) {
+    const content = attributes.get('content');
+
+    if (attributes.get('name')?.toLowerCase() === name && content !== undefined) {
+      return content.trim();
+    }
+  }
+
+  return null;
 }
 
 export function stripTags(html: string): string {
@@ -60,18 +90,17 @@ export function countBodyWords(html: string): number {
   const bodyStart = html.search(/<body[\s>]/i);
   const body = bodyStart >= 0 ? html.slice(bodyStart) : html;
   const text = stripTags(body);
+
   return text ? text.split(' ').length : 0;
 }
 
 export function resolveLinks(hrefs: readonly string[], base: string): string[] {
   const resolved: string[] = [];
-  for (const href of hrefs) {
-    try {
-      resolved.push(new URL(href, base).toString());
-    } catch {
 
-    }
+  for (const href of hrefs) {
+    if (URL.canParse(href, base)) resolved.push(new URL(href, base).toString());
   }
+
   return resolved;
 }
 
@@ -79,25 +108,33 @@ export function analyzeHtml(html: string): HtmlAnalysis {
   const headEnd = html.search(/<\/head/i);
   const head = headEnd > 0 ? html.slice(0, headEnd) : html;
 
-  const title = extractTag(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
-  const metaDescription =
-    extractTag(head, /<meta[^>]+name=["']description["'][^>]+content=["']([\s\S]*?)["']/i) ??
-    extractTag(head, /<meta[^>]+content=["']([\s\S]*?)["'][^>]+name=["']description["']/i);
-  const canonical =
-    extractTag(head, /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i) ??
-    extractTag(head, /<link[^>]+href=["']([^"']+)["'][^>]+rel=["']canonical["']/i);
-  const robotsMeta = extractTag(head, /<meta[^>]+name=["']robots["'][^>]+content=["']([^"']*)["']/i);
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].trim() : null;
+  const metaDescription = metaContent(head, 'description');
+
+  const canonicalLink = tagAttributes(head, 'link').find(
+    (attributes) =>
+      attributes.get('rel')?.toLowerCase().split(/\s+/).includes('canonical') &&
+      attributes.get('href'),
+  );
+
+  const canonical = canonicalLink?.get('href')?.trim() ?? null;
+  const robotsMeta = metaContent(head, 'robots');
   const noindex = /noindex/i.test(robotsMeta ?? '');
 
   const h1Count = (html.match(/<h1[\s>]/gi) ?? []).length;
   const iframeCount = (html.match(/<iframe[\s>]/gi) ?? []).length;
 
-  const hrefs = Array.from(html.matchAll(/<a\s[^>]*href=["']([^"']*)["']/gi)).map((m) =>
-    m[1].trim(),
-  );
+  const hrefs = tagAttributes(html, 'a').flatMap((attributes) => {
+    const href = attributes.get('href');
+
+    return href === undefined ? [] : [href.trim()];
+  });
+
   const crawlableHrefs = hrefs.filter(
     (h) => h && !h.startsWith('#') && !h.toLowerCase().startsWith('javascript:'),
   );
+
   const crawlableLinks = crawlableHrefs.length;
   const anchorTotal = (html.match(/<a[\s>]/gi) ?? []).length;
   const jsLinks = Math.max(0, anchorTotal - crawlableLinks);
@@ -109,6 +146,7 @@ export function analyzeHtml(html: string): HtmlAnalysis {
   const appShell = wordCount < 60 && APP_SHELL_MARKERS.some((m) => body.includes(m));
 
   let verdict: Verdict = 'good';
+
   if (appShell || wordCount < 60 || noindex) verdict = 'poor';
   else if (wordCount < 250 || crawlableLinks < 5 || !metaDescription) verdict = 'partial';
 

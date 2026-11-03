@@ -1,5 +1,7 @@
+import { lookup } from 'node:dns/promises';
 import { readFileSync } from 'node:fs';
-import { gunzipSync } from 'node:zlib';
+import { BlockList, isIP } from 'node:net';
+import { constants, gunzipSync } from 'node:zlib';
 import {
   agentsDisallowedSitewide,
   AI_CRAWLER_AGENTS,
@@ -34,7 +36,14 @@ export interface AuditPage extends Partial<Omit<HtmlAnalysis, 'links'>> {
 
 export interface AuditReport {
   pages: AuditPage[];
-  summary: { total: number; good: number; partial: number; poor: number; failed: number };
+  summary: {
+    total: number;
+    good: number;
+    partial: number;
+    poor: number;
+    failed: number;
+    failedSitemaps?: number;
+  };
 }
 
 export interface AuditOptions {
@@ -54,15 +63,34 @@ function isGzip(url: string, contentType: string | null): boolean {
   return /\.gz(\?|$)/i.test(url) || /gzip|x-gzip/i.test(contentType ?? '');
 }
 
+function gunzip(data: Uint8Array, url: string): Uint8Array {
+  try {
+    return new Uint8Array(
+      gunzipSync(data, { maxOutputLength: MAX_HTML_BYTES, finishFlush: constants.Z_SYNC_FLUSH }),
+    );
+  } catch (err) {
+    const tooLarge = err instanceof RangeError;
+    throw new Error(
+      tooLarge
+        ? `${url} is larger than ${MAX_HTML_BYTES} bytes once decompressed`
+        : `${url} could not be decompressed`,
+    );
+  }
+}
+
 async function readBody(response: Response, url: string): Promise<string> {
-  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+  if (!response.body) throw new Error(`${url} returned no body`);
+  const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
+
   for (;;) {
     const { done, value } = await reader.read();
+
     if (done) break;
     chunks.push(value);
     size += value.byteLength;
+
     if (size >= MAX_HTML_BYTES) {
       await reader.cancel();
       break;
@@ -71,17 +99,83 @@ async function readBody(response: Response, url: string): Promise<string> {
 
   const joined = new Uint8Array(size);
   let offset = 0;
+
   for (const chunk of chunks) {
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
 
   const bytes = isGzip(url, response.headers.get('content-type'))
-    ? new Uint8Array(gunzipSync(joined))
+    ? gunzip(joined, url)
     : joined;
 
   return new TextDecoder().decode(bytes.slice(0, MAX_HTML_BYTES));
 }
+
+const PRIVATE_RANGES = new BlockList();
+
+for (const [network, prefix] of [
+  ['0.0.0.0', 8],
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['127.0.0.0', 8],
+  ['169.254.0.0', 16],
+  ['172.16.0.0', 12],
+  ['192.0.0.0', 24],
+  ['192.168.0.0', 16],
+  ['198.18.0.0', 15],
+  ['224.0.0.0', 4],
+  ['240.0.0.0', 4],
+] as const) {
+  PRIVATE_RANGES.addSubnet(network, prefix, 'ipv4');
+}
+
+for (const [network, prefix] of [
+  ['::', 128],
+  ['::1', 128],
+  ['fc00::', 7],
+  ['fe80::', 10],
+  ['ff00::', 8],
+] as const) {
+  PRIVATE_RANGES.addSubnet(network, prefix, 'ipv6');
+}
+
+export function isPrivateAddress(address: string): boolean {
+  const family = isIP(address);
+
+  if (family === 0) return true;
+
+  return PRIVATE_RANGES.check(address, family === 4 ? 'ipv4' : 'ipv6');
+}
+
+type Resolver = (hostname: string) => Promise<string[]>;
+
+const resolveAddresses: Resolver = async (hostname) =>
+  (await lookup(hostname, { all: true })).map((entry) => entry.address);
+
+export function createPublicFetch(
+  base: typeof fetch = fetch,
+  resolve: Resolver = resolveAddresses,
+): typeof fetch {
+  return async (input, init) => {
+    const target = new URL(input instanceof Request ? input.url : String(input));
+
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      throw new Error(`${target.protocol} URLs can't be fetched`);
+    }
+
+    const hostname = target.hostname.replace(/^\[|\]$/g, '');
+    const addresses = isIP(hostname) ? [hostname] : await resolve(hostname);
+
+    if (addresses.length === 0 || addresses.some(isPrivateAddress)) {
+      throw new Error(`${target.hostname} resolves to a private or internal address`);
+    }
+
+    return base(input, init);
+  };
+}
+
+export const publicFetch = createPublicFetch();
 
 async function get(
   url: string,
@@ -90,23 +184,28 @@ async function get(
   fetchImpl: typeof fetch,
 ): Promise<{ response: Response; finalUrl: string }> {
   let current = url;
+
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const response = await fetchImpl(current, {
       redirect: 'manual',
       headers: { 'User-Agent': userAgent, Accept: accept },
       signal: AbortSignal.timeout(ANALYZE_TIMEOUT_MS),
     });
+
     const location = response.status >= 300 && response.status < 400
       ? response.headers.get('location')
       : null;
+
     if (!location) return { response, finalUrl: current };
     current = new URL(location, current).toString();
   }
+
   throw new Error('Too many redirects');
 }
 
 async function fetchPage(url: string, fetchImpl: typeof fetch): Promise<FetchedPage> {
   const first = await get(url, GOOGLEBOT_UA, 'text/html', fetchImpl);
+
   if (first.response.status < 400) {
     return {
       finalUrl: first.finalUrl,
@@ -117,6 +216,7 @@ async function fetchPage(url: string, fetchImpl: typeof fetch): Promise<FetchedP
   }
 
   const retry = await get(url, BROWSER_UA, 'text/html', fetchImpl);
+
   return {
     finalUrl: retry.finalUrl,
     status: retry.response.status,
@@ -132,6 +232,7 @@ export async function auditUrl(
 ): Promise<AuditPage> {
   try {
     const page = await fetchPage(url, fetchImpl);
+
     if (page.status >= 400) {
       return {
         url,
@@ -142,18 +243,24 @@ export async function auditUrl(
         error: `HTTP ${page.status}`,
       };
     }
+
     const { links, ...analysis } = analyzeHtml(page.html);
-    return {
+
+    const result: AuditPage = {
       url,
       finalUrl: page.finalUrl,
       status: page.status,
       ok: true,
       crawlerBlocked: page.crawlerBlocked,
       ...analysis,
-      ...(options.keepLinks ? { links } : {}),
     };
+
+    if (options.keepLinks) result.links = links;
+
+    return result;
   } catch (err) {
     const aborted = err instanceof Error && err.name === 'TimeoutError';
+
     return {
       url,
       finalUrl: null,
@@ -165,8 +272,14 @@ export async function auditUrl(
   }
 }
 
-export function parseSitemap(xml: string): { urls: string[]; isIndex: boolean } {
+export interface Sitemap {
+  urls: string[];
+  isIndex: boolean;
+}
+
+export function parseSitemap(xml: string): Sitemap {
   const urls = Array.from(xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)).map((m) => m[1]);
+
   return { urls, isIndex: /<sitemapindex[\s>]/i.test(xml) };
 }
 
@@ -174,26 +287,33 @@ export async function urlsFromSitemap(
   sitemapUrl: string,
   fetchImpl: typeof fetch,
   limit: number,
+  failedSitemaps: string[] = [],
 ): Promise<string[]> {
-  const load = async (target: string): Promise<{ urls: string[]; isIndex: boolean }> => {
+  const load = async (target: string): Promise<Sitemap> => {
     const { response, finalUrl } = await get(target, GOOGLEBOT_UA, 'application/xml', fetchImpl);
+
     if (response.status >= 400) throw new Error(`${target} answered HTTP ${response.status}`);
+
     return parseSitemap(await readBody(response, finalUrl));
   };
 
   const root = await load(sitemapUrl);
+
   if (!root.isIndex) return root.urls.slice(0, limit);
 
   const collected: string[] = [];
+
   for (const child of root.urls) {
     if (collected.length >= limit) break;
+
     try {
       const { urls } = await load(child);
       collected.push(...urls);
     } catch {
-
+      failedSitemaps.push(child);
     }
   }
+
   return collected.slice(0, limit);
 }
 
@@ -210,21 +330,26 @@ export async function audit(
 ): Promise<AuditReport> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const limit = options.limit ?? DEFAULT_LIMIT;
+
   const concurrency = Math.min(
     Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY),
     MAX_CONCURRENCY,
   );
+
   const targets = urls.slice(0, limit);
-  const pages: AuditPage[] = new Array(targets.length);
+  const pages: AuditPage[] = [];
 
   let next = 0;
+
   const worker = async (): Promise<void> => {
     for (;;) {
       const index = next++;
+
       if (index >= targets.length) return;
       pages[index] = await auditUrl(targets[index], fetchImpl);
     }
   };
+
   await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, worker));
 
   const count = (verdict: Verdict): number =>
@@ -248,6 +373,7 @@ export function failsThreshold(report: AuditReport, threshold: Verdict): boolean
   return report.pages.some(
     (page) =>
       !page.ok ||
+      page.crawlerBlocked ||
       (page.verdict !== undefined &&
         page.verdict !== null &&
         VERDICT_RANK[page.verdict] <= VERDICT_RANK[threshold]),
@@ -262,19 +388,24 @@ export function formatTable(report: AuditReport): string {
     page.crawlerBlocked ? 'blocked' : '',
     page.ok ? page.url : `${page.url}  (${page.error})`,
   ]);
+
   const header = ['verdict', 'words', 'links', 'crawler', 'url'];
+
   const widths = header.map((head, i) =>
     Math.max(head.length, ...rows.map((row) => row[i].length)),
   );
+
   const line = (cells: string[]): string =>
     cells.map((cell, i) => (i === cells.length - 1 ? cell : cell.padEnd(widths[i]))).join('  ');
 
-  const { total, good, partial, poor, failed } = report.summary;
+  const { total, good, partial, poor, failed, failedSitemaps } = report.summary;
+
   return [
     line(header),
     ...rows.map(line),
     '',
     `${total} pages: ${good} good, ${partial} partial, ${poor} poor, ${failed} failed`,
+    ...(failedSitemaps ? [`child sitemaps that could not be read: ${failedSitemaps}`] : []),
   ].join('\n');
 }
 
@@ -309,7 +440,7 @@ export interface AiCrawlerReport {
 }
 
 function toSitePage(page: AuditPage): SitePage {
-  return {
+  const site: SitePage = {
     url: page.url,
     ok: page.ok,
     verdict: page.verdict ?? null,
@@ -320,15 +451,21 @@ function toSitePage(page: AuditPage): SitePage {
     appShell: page.appShell ?? null,
     noindex: page.noindex ?? null,
     hasDescription: page.ok ? Boolean(page.metaDescription) : null,
-    ...(page.error ? { error: page.error } : {}),
   };
+
+  if (page.error) site.error = page.error;
+
+  return site;
 }
 
 export function normalizeHost(raw: string): string | null {
   const trimmed = raw.trim();
+
   if (!trimmed || trimmed.length > 2000) return null;
+
   try {
     const url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+
     return url.hostname.includes('.') ? url.hostname : null;
   } catch {
     return null;
@@ -347,13 +484,17 @@ export async function fetchRobots(
         'text/plain',
         fetchImpl,
       );
+
       if (response.status === 404) return { text: '', fetched: true };
+
       if (response.status < 200 || response.status >= 300) continue;
+
       return { text: await readBody(response, finalUrl), fetched: true };
     } catch {
       continue;
     }
   }
+
   return { text: '', fetched: false };
 }
 
@@ -363,6 +504,7 @@ export async function checkAiCrawlers(
 ): Promise<AiCrawlerReport> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const host = normalizeHost(domain);
+
   if (!host) throw new Error("That domain can't be checked. Use a public domain, like example.com.");
 
   const robots = await fetchRobots(host, fetchImpl);
@@ -381,6 +523,7 @@ export async function checkAiCrawlers(
 export async function analyzeSite(url: string, options: AuditOptions = {}): Promise<SiteReport> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const host = normalizeHost(url);
+
   if (!host) throw new Error("That URL can't be checked. Use a public website address.");
 
   const start = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`;
@@ -388,6 +531,7 @@ export async function analyzeSite(url: string, options: AuditOptions = {}): Prom
   const homeUrl = home.finalUrl ?? start;
 
   const extraUrls = home.ok ? pickSitePages(home.links ?? [], homeUrl, SITE_MAX_PAGES - 1) : [];
+
   const [extra, robots] = await Promise.all([
     audit(extraUrls, { ...options, concurrency: options.concurrency ?? SITE_CONCURRENCY }),
     fetchRobots(host, fetchImpl),

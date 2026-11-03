@@ -8,6 +8,7 @@ export function pickSitePages(
   max: number = SITE_MAX_PAGES,
 ): string[] {
   let base: URL;
+
   try {
     base = new URL(baseUrl);
   } catch {
@@ -19,17 +20,22 @@ export function pickSitePages(
 
   for (const link of links) {
     let url: URL;
+
     try {
       url = new URL(link, base);
     } catch {
       continue;
     }
+
     if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+
     if (url.hostname !== base.hostname) continue;
+
     if (isStaticFile(url.pathname)) continue;
 
     url.hash = '';
     const key = url.toString();
+
     if (seen.has(key)) continue;
     seen.add(key);
 
@@ -42,6 +48,7 @@ export function pickSitePages(
 
   for (const candidate of candidates) {
     if (picked.length >= max) break;
+
     if (usedSegments.has(candidate.segment)) continue;
     usedSegments.add(candidate.segment);
     picked.push(candidate.url);
@@ -49,8 +56,10 @@ export function pickSitePages(
 
   if (picked.length < max) {
     const already = new Set(picked);
+
     for (const candidate of candidates) {
       if (picked.length >= max) break;
+
       if (already.has(candidate.url)) continue;
       already.add(candidate.url);
       picked.push(candidate.url);

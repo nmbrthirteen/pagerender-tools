@@ -3,19 +3,15 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { API_URL_ENV_VAR, createServer, TOKEN_ENV_VAR } from './index.js';
 import pkg from '../package.json' with { type: 'json' };
-
-function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status: init.status ?? 200,
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
-  });
-}
+import { fakeFetch, jsonResponse, sentHeaders } from '../../../test-support/fake-fetch.js';
 
 type CallToolResult = Awaited<ReturnType<Client['callTool']>>;
 
 function textOf(result: CallToolResult): string {
   const first = result.content[0];
+
   if (!first || first.type !== 'text') throw new Error('expected text content');
+
   return first.text;
 }
 
@@ -25,6 +21,7 @@ async function connect(
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test-client', version: '0.0.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
   return client;
 }
 
@@ -82,22 +79,25 @@ describe('tool allowlist', () => {
 
   test('the three site tools answer with no token and never call our API', async () => {
     const seen: string[] = [];
+
     const client = await connect(
       createServer({
         apiUrl: 'https://api.test',
-        fetchImpl: (async (url: string) => {
+        fetchImpl: fakeFetch(async (url: string) => {
           seen.push(url);
+
           if (url.endsWith('/robots.txt')) {
             return new Response('User-agent: GPTBot\nDisallow: /\n', {
               status: 200,
               headers: { 'content-type': 'text/plain' },
             });
           }
+
           return new Response(
             '<html><head><title>T</title></head><body><p>one two</p></body></html>',
             { status: 200, headers: { 'content-type': 'text/html' } },
           );
-        }) as unknown as typeof fetch,
+        }),
       }),
     );
 
@@ -118,22 +118,21 @@ describe('tool allowlist', () => {
     const client = await connect(
       createServer({
         apiUrl: 'https://api.test',
-        fetchImpl: (async () =>
+        fetchImpl: fakeFetch(async () =>
           new Response('User-agent: GPTBot\nDisallow: /\n', {
             status: 200,
             headers: { 'content-type': 'text/plain' },
-          })) as unknown as typeof fetch,
+          })),
       }),
     );
+
     const result = await client.callTool({
       name: 'check_ai_crawlers',
       arguments: { domain: 'example.com' },
     });
-    const body = JSON.parse(textOf(result)) as {
-      blocked: string[];
-      allowed: string[];
-      aiCrawlers: number;
-    };
+
+    const body = JSON.parse(textOf(result));
+
     expect(body.blocked).toEqual(['gptbot']);
     expect(body.aiCrawlers).toBe(21);
     expect(body.allowed).toHaveLength(20);
@@ -143,19 +142,22 @@ describe('tool allowlist', () => {
 
 describe('analyze_url', () => {
   test('fetches the target site as Googlebot, with no token header anywhere', async () => {
-    let sentHeaders: Record<string, string> = {};
+    let headers = new Headers();
     let sentUrl = '';
+
     const server = createServer({
       apiUrl: 'https://api.test',
-      fetchImpl: (async (url: string, init: RequestInit) => {
+      fetchImpl: fakeFetch(async (url: string, init: RequestInit) => {
         sentUrl = url;
-        sentHeaders = init.headers as Record<string, string>;
+        headers = sentHeaders(init);
+
         return new Response(
           '<html><head><title>Example</title></head><body><div id="root"></div></body></html>',
           { status: 200, headers: { 'content-type': 'text/html' } },
         );
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({
@@ -165,13 +167,67 @@ describe('analyze_url', () => {
 
     expect(result.isError).toBeFalsy();
     expect(sentUrl).toBe('https://example.com/');
-    expect(sentHeaders['User-Agent']).toContain('Googlebot');
-    expect(sentHeaders['X-Pagerender-Token']).toBeUndefined();
+    expect(headers.get('User-Agent')).toContain('Googlebot');
+    expect(headers.get('X-Pagerender-Token')).toBeNull();
 
-    const body = JSON.parse(textOf(result)) as { verdict: string; appShell: boolean; title: string };
+    const body = JSON.parse(textOf(result));
     expect(body.verdict).toBe('poor');
     expect(body.appShell).toBe(true);
     expect(body.title).toBe('Example');
+  });
+});
+
+describe('analyze_url target checks', () => {
+  test('rejects a host that is not a public website address', async () => {
+    let called = false;
+
+    const client = await connect(
+      createServer({
+        fetchImpl: fakeFetch(async () => {
+          called = true;
+
+          return new Response('');
+        }),
+      }),
+    );
+
+    const result = await client.callTool({
+      name: 'analyze_url',
+      arguments: { url: 'http://localhost/' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(called).toBe(false);
+  });
+
+  test('adds https:// to a bare domain', async () => {
+    let sentUrl = '';
+
+    const client = await connect(
+      createServer({
+        fetchImpl: fakeFetch(async (url: string) => {
+          sentUrl = url;
+
+          return new Response('<html><head><title>T</title></head><body></body></html>');
+        }),
+      }),
+    );
+
+    await client.callTool({ name: 'analyze_url', arguments: { url: 'example.com' } });
+    expect(sentUrl).toBe('https://example.com');
+  });
+
+  test('refuses a private address by default', async () => {
+    const client = await connect(createServer());
+
+    const result = await client.callTool({
+      name: 'analyze_url',
+      arguments: { url: 'http://169.254.169.254/latest/meta-data/' },
+    });
+
+    const body = JSON.parse(textOf(result));
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('private or internal');
   });
 });
 
@@ -179,10 +235,11 @@ describe('render_stats', () => {
   test('without a token fails with a message naming PAGERENDER_TOKEN', async () => {
     const server = createServer({
       apiUrl: 'https://api.test',
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         throw new Error('should not reach the network without a token');
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({ name: 'render_stats', arguments: {} });
@@ -196,10 +253,11 @@ describe('index_status', () => {
   test('without a token fails with a message naming PAGERENDER_TOKEN', async () => {
     const server = createServer({
       apiUrl: 'https://api.test',
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         throw new Error('should not reach the network without a token');
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({
@@ -213,17 +271,21 @@ describe('index_status', () => {
 
   test('resolves the domain from the url, then reads its timeline', async () => {
     const seen: string[] = [];
+
     const server = createServer({
       apiUrl: 'https://api.test',
       token: 'tok_123',
-      fetchImpl: (async (url: string) => {
+      fetchImpl: fakeFetch(async (url: string) => {
         seen.push(url);
+
         if (url.includes('/v1/settings/domains')) {
           return jsonResponse({ domains: [{ id: 'dom_1', domain: 'example.com' }] });
         }
+
         return jsonResponse({ url: 'https://example.com/pricing', state: 'indexed', guidance: 'Nothing to do.' });
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({
@@ -243,10 +305,11 @@ describe('indexing_overview', () => {
   test('without a token fails with a message naming PAGERENDER_TOKEN', async () => {
     const server = createServer({
       apiUrl: 'https://api.test',
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         throw new Error('should not reach the network without a token');
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({ name: 'indexing_overview', arguments: { domain: 'example.com' } });
@@ -257,17 +320,21 @@ describe('indexing_overview', () => {
 
   test('resolves the domain, then reads the agent status', async () => {
     const seen: string[] = [];
+
     const server = createServer({
       apiUrl: 'https://api.test',
       token: 'tok_123',
-      fetchImpl: (async (url: string) => {
+      fetchImpl: fakeFetch(async (url: string) => {
         seen.push(url);
+
         if (url.includes('/v1/settings/domains')) {
           return jsonResponse({ domains: [{ id: 'dom_1', domain: 'example.com' }] });
         }
+
         return jsonResponse({ runs: [], decisions: [], outcome: {}, quota: null, stalled: [] });
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({ name: 'indexing_overview', arguments: { domain: 'example.com' } });
@@ -281,8 +348,9 @@ describe('indexing_overview', () => {
     const server = createServer({
       apiUrl: 'https://api.test',
       token: 'tok_123',
-      fetchImpl: (async () => jsonResponse({ domains: [] })) as unknown as typeof fetch,
+      fetchImpl: fakeFetch(async () => jsonResponse({ domains: [] })),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({ name: 'indexing_overview', arguments: { domain: 'nope.test' } });
@@ -297,7 +365,7 @@ describe('PagerenderError mapping', () => {
     const server = createServer({
       apiUrl: 'https://api.test',
       token: 'tok_123',
-      fetchImpl: (async () =>
+      fetchImpl: fakeFetch(async () =>
         jsonResponse(
           {
             type: 'https://pagerender.io/docs/api#forbidden_domain',
@@ -307,8 +375,9 @@ describe('PagerenderError mapping', () => {
             code: 'FORBIDDEN_DOMAIN',
           },
           { status: 403 },
-        )) as unknown as typeof fetch,
+        )),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({
@@ -324,17 +393,20 @@ describe('PagerenderError mapping', () => {
 
   test('a 429 surfaces the retry hint rather than a bare failure', async () => {
     let calls = 0;
+
     const server = createServer({
       apiUrl: 'https://api.test',
       token: 'tok_123',
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         calls += 1;
+
         return jsonResponse(
           { code: 'RATE_LIMITED', detail: 'Too many requests', status: 429 },
           { status: 429, headers: { 'retry-after': '0' } },
         );
-      }) as unknown as typeof fetch,
+      }),
     });
+
     const client = await connect(server);
 
     const result = await client.callTool({ name: 'render_stats', arguments: {} });

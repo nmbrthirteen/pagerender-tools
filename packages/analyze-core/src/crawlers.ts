@@ -42,5 +42,6 @@ export const IGNORE_EXTENSIONS = [
 
 export function isStaticFile(pathname: string): boolean {
   const ext = pathname.substring(pathname.lastIndexOf('.') || pathname.length).toLowerCase();
-  return (IGNORE_EXTENSIONS as readonly string[]).includes(ext);
+
+  return IGNORE_EXTENSIONS.some((candidate) => candidate === ext);
 }

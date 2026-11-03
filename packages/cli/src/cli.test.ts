@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { BOOLEAN_FLAGS, NEEDS_TOKEN_COMMANDS, parseArgs, run } from './cli.js';
 import {
   PagerenderClient,
@@ -11,6 +11,13 @@ import {
   retryAfterSeconds,
 } from './index.js';
 import pkg from '../package.json' with { type: 'json' };
+import {
+  fakeFetch,
+  jsonResponse,
+  rejectionOf,
+  sentBody,
+  sentHeaders,
+} from '../../../test-support/fake-fetch.js';
 
 describe('parseArgs', () => {
   test('splits the command from its arguments', () => {
@@ -77,16 +84,17 @@ describe('version', () => {
 
   test('--version prints it and exits clean', async () => {
     const written: string[] = [];
-    const original = process.stdout.write;
-    process.stdout.write = ((chunk: string) => {
+
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       written.push(String(chunk));
+
       return true;
-    }) as typeof process.stdout.write;
+    });
 
     try {
       expect(await run(['--version'])).toBe(0);
     } finally {
-      process.stdout.write = original;
+      stdout.mockRestore();
     }
 
     expect(written.join('')).toBe(`${VERSION}\n`);
@@ -133,55 +141,54 @@ describe('retryAfterSeconds', () => {
   });
 });
 
-function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status: init.status ?? 200,
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
-  });
-}
-
 describe('PagerenderClient', () => {
   test('sends the token in the header the API documents', async () => {
     const seen: Array<{ url: string; init: RequestInit }> = [];
+
     const client = new PagerenderClient({
       token: 'tok_123',
       apiUrl: 'https://api.test',
-      fetchImpl: (async (url: string, init: RequestInit) => {
+      fetchImpl: fakeFetch(async (url: string, init: RequestInit) => {
         seen.push({ url, init });
+
         return jsonResponse({ ok: true });
-      }) as unknown as typeof fetch,
+      }),
     });
 
     await client.verify('https://example.com/');
 
     expect(seen[0].url).toBe('https://api.test/v1/verify-integration');
-    expect((seen[0].init.headers as Record<string, string>)['X-Pagerender-Token']).toBe('tok_123');
-    expect(JSON.parse(seen[0].init.body as string)).toEqual({ url: 'https://example.com/' });
+    expect(sentHeaders(seen[0].init).get('X-Pagerender-Token')).toBe('tok_123');
+    expect(sentBody(seen[0].init)).toEqual({ url: 'https://example.com/' });
   });
 
   test('sends no token when there is none, which is what analyze needs', async () => {
-    let sentHeaders: Record<string, string> = {};
+    let headers = new Headers();
+
     const client = new PagerenderClient({
       apiUrl: 'https://api.test',
-      fetchImpl: (async (_url: string, init: RequestInit) => {
-        sentHeaders = init.headers as Record<string, string>;
+      fetchImpl: fakeFetch(async (_url: string, init: RequestInit) => {
+        headers = sentHeaders(init);
+
         return jsonResponse({ verdict: 'poor' });
-      }) as unknown as typeof fetch,
+      }),
     });
 
     expect(await client.analyze('https://example.com/')).toEqual({ verdict: 'poor' });
-    expect(sentHeaders['X-Pagerender-Token']).toBeUndefined();
+    expect(headers.get('X-Pagerender-Token')).toBeNull();
   });
 
   test('drops empty query values instead of sending them', async () => {
     let seenUrl = '';
+
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
-      fetchImpl: (async (url: string) => {
+      fetchImpl: fakeFetch(async (url: string) => {
         seenUrl = url;
+
         return jsonResponse({});
-      }) as unknown as typeof fetch,
+      }),
     });
 
     await client.stats({ period: '7d', domain: undefined });
@@ -192,7 +199,7 @@ describe('PagerenderClient', () => {
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
-      fetchImpl: (async () =>
+      fetchImpl: fakeFetch(async () =>
         jsonResponse(
           {
             type: 'https://pagerender.io/docs/api#forbidden_domain',
@@ -203,10 +210,10 @@ describe('PagerenderClient', () => {
             error: { code: 'FORBIDDEN_DOMAIN', message: 'This domain is not registered to this account' },
           },
           { status: 403, headers: { 'content-type': 'application/problem+json' } },
-        )) as unknown as typeof fetch,
+        )),
     });
 
-    const err = (await client.render('https://example.com/').catch((e) => e)) as PagerenderError;
+    const err = await rejectionOf(client.render('https://example.com/'), PagerenderError);
     expect(err).toBeInstanceOf(PagerenderError);
     expect(err.code).toBe('FORBIDDEN_DOMAIN');
     expect(err.status).toBe(403);
@@ -215,22 +222,25 @@ describe('PagerenderClient', () => {
   test('waits out Retry-After on a 429 and retries once', async () => {
     let calls = 0;
     const slept: number[] = [];
+
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
       sleep: async (ms) => {
         slept.push(ms);
       },
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         calls += 1;
+
         if (calls === 1) {
           return jsonResponse(
             { code: 'RATE_LIMITED', error: { code: 'RATE_LIMITED', message: 'Slow down' } },
             { status: 429, headers: { 'retry-after': '2' } },
           );
         }
+
         return jsonResponse({ purged: 3 });
-      }) as unknown as typeof fetch,
+      }),
     });
 
     expect(await client.purge({ pattern: '/games/*' })).toEqual({ purged: 3 });
@@ -246,23 +256,24 @@ describe('PagerenderClient', () => {
       sleep: async () => {
         throw new Error('should not sleep');
       },
-      fetchImpl: (async () =>
-        jsonResponse({ code: 'RATE_LIMITED' }, { status: 429 })) as unknown as typeof fetch,
+      fetchImpl: fakeFetch(async () =>
+        jsonResponse({ code: 'RATE_LIMITED' }, { status: 429 })),
     });
 
-    const err = (await client.stats().catch((e) => e)) as PagerenderError;
+    const err = await rejectionOf(client.stats(), PagerenderError);
     expect(err.status).toBe(429);
     expect(err.code).toBe('RATE_LIMITED');
   });
 
   test('reports the budget from every response', async () => {
     const seen: Array<number | null> = [];
+
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
       onRateLimit: (limit) => seen.push(limit.remaining),
-      fetchImpl: (async () =>
-        jsonResponse({}, { headers: { 'ratelimit-limit': '10', 'ratelimit-remaining': '9' } })) as unknown as typeof fetch,
+      fetchImpl: fakeFetch(async () =>
+        jsonResponse({}, { headers: { 'ratelimit-limit': '10', 'ratelimit-remaining': '9' } })),
     });
 
     await client.stats();
@@ -273,54 +284,58 @@ describe('PagerenderClient', () => {
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
-      fetchImpl: (async () =>
+      fetchImpl: fakeFetch(async () =>
         new Response('<html><body>hi</body></html>', {
           headers: { 'content-type': 'text/html' },
-        })) as unknown as typeof fetch,
+        })),
     });
 
     expect(await client.renderHtml('https://example.com/')).toBe('<html><body>hi</body></html>');
   });
 
   test('asks for html on the endpoint that answers html', async () => {
-    let sent: Record<string, string> = {};
+    let sent = new Headers();
+
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
-      fetchImpl: (async (_url: string, init: RequestInit) => {
-        sent = init.headers as Record<string, string>;
+      fetchImpl: fakeFetch(async (_url: string, init: RequestInit) => {
+        sent = sentHeaders(init);
+
         return new Response('<html></html>', { headers: { 'content-type': 'text/html' } });
-      }) as unknown as typeof fetch,
+      }),
     });
 
     await client.renderHtml('https://example.com/');
-    expect(sent.Accept).toBe('text/html');
+    expect(sent.get('Accept')).toBe('text/html');
   });
 
   test('asks for json everywhere else', async () => {
-    let sent: Record<string, string> = {};
+    let sent = new Headers();
+
     const client = new PagerenderClient({
       token: 't',
       apiUrl: 'https://api.test',
-      fetchImpl: (async (_url: string, init: RequestInit) => {
-        sent = init.headers as Record<string, string>;
+      fetchImpl: fakeFetch(async (_url: string, init: RequestInit) => {
+        sent = sentHeaders(init);
+
         return jsonResponse({});
-      }) as unknown as typeof fetch,
+      }),
     });
 
     await client.stats();
-    expect(sent.Accept).toBe('application/json');
+    expect(sent.get('Accept')).toBe('application/json');
   });
 
   test('names the host when the connection fails', async () => {
     const client = new PagerenderClient({
       apiUrl: 'https://api.test',
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         throw new TypeError('fetch failed');
-      }) as unknown as typeof fetch,
+      }),
     });
 
-    const err = (await client.health().catch((e) => e)) as PagerenderError;
+    const err = await rejectionOf(client.health(), PagerenderError);
     expect(err).toBeInstanceOf(PagerenderError);
     expect(err.code).toBe('CONNECTION_FAILED');
     expect(err.message).toContain('https://api.test/v1/health');
@@ -329,26 +344,28 @@ describe('PagerenderClient', () => {
   test('reports a timeout as a timeout', async () => {
     const client = new PagerenderClient({
       apiUrl: 'https://api.test',
-      fetchImpl: (async () => {
+      fetchImpl: fakeFetch(async () => {
         const err = new Error('The operation timed out');
         err.name = 'TimeoutError';
         throw err;
-      }) as unknown as typeof fetch,
+      }),
     });
 
-    const err = (await client.health().catch((e) => e)) as PagerenderError;
+    const err = await rejectionOf(client.health(), PagerenderError);
     expect(err.code).toBe('TIMEOUT');
     expect(err.message).toContain('https://api.test/v1/health');
   });
 
   test('trims a trailing slash off the api url instead of doubling it', async () => {
     let seenUrl = '';
+
     const client = new PagerenderClient({
       apiUrl: 'https://api.test/',
-      fetchImpl: (async (url: string) => {
+      fetchImpl: fakeFetch(async (url: string) => {
         seenUrl = url;
+
         return jsonResponse({});
-      }) as unknown as typeof fetch,
+      }),
     });
 
     await client.health();
@@ -372,10 +389,11 @@ describe('index', () => {
   test('queues urls from positional arguments', async () => {
     const originalFetch = global.fetch;
     const seen: Array<{ url: string; init: RequestInit }> = [];
-    global.fetch = (async (url: string, init: RequestInit) => {
+    global.fetch = fakeFetch(async (url: string, init: RequestInit) => {
       seen.push({ url, init });
+
       return jsonResponse({ accepted: ['https://a.test/'], rejected: [], nextRunAt: '2026-01-01T00:20:00.000Z', guidance: '1 page queued.' });
-    }) as unknown as typeof fetch;
+    });
 
     try {
       expect(await run(['index', 'https://a.test/', '--token', 't'])).toBe(0);
@@ -384,7 +402,7 @@ describe('index', () => {
     }
 
     expect(seen[0].url).toBe('https://api.pagerender.io/v1/indexing/request');
-    expect(JSON.parse(seen[0].init.body as string)).toEqual({ urls: ['https://a.test/'] });
+    expect(sentBody(seen[0].init)).toEqual({ urls: ['https://a.test/'] });
   });
 
   test('reads urls from --file, one per line', async () => {
@@ -394,10 +412,11 @@ describe('index', () => {
 
     const originalFetch = global.fetch;
     const seen: Array<{ url: string; init: RequestInit }> = [];
-    global.fetch = (async (url: string, init: RequestInit) => {
+    global.fetch = fakeFetch(async (url: string, init: RequestInit) => {
       seen.push({ url, init });
+
       return jsonResponse({ accepted: [], rejected: [], nextRunAt: '2026-01-01T00:20:00.000Z', guidance: 'none' });
-    }) as unknown as typeof fetch;
+    });
 
     try {
       expect(await run(['index', '--file', file, '--token', 't'])).toBe(0);
@@ -406,7 +425,7 @@ describe('index', () => {
       rmSync(dir, { recursive: true, force: true });
     }
 
-    expect(JSON.parse(seen[0].init.body as string)).toEqual({
+    expect(sentBody(seen[0].init)).toEqual({
       urls: ['https://a.test/', 'https://b.test/'],
     });
   });
@@ -414,10 +433,11 @@ describe('index', () => {
   test('sends the idempotency key header when given one', async () => {
     const originalFetch = global.fetch;
     const seen: Array<{ init: RequestInit }> = [];
-    global.fetch = (async (_url: string, init: RequestInit) => {
+    global.fetch = fakeFetch(async (_url: string, init: RequestInit) => {
       seen.push({ init });
+
       return jsonResponse({ accepted: [], rejected: [], nextRunAt: '2026-01-01T00:20:00.000Z', guidance: 'none' });
-    }) as unknown as typeof fetch;
+    });
 
     try {
       expect(
@@ -427,7 +447,7 @@ describe('index', () => {
       global.fetch = originalFetch;
     }
 
-    expect((seen[0].init.headers as Record<string, string>)['Idempotency-Key']).toBe('deploy-42');
+    expect(sentHeaders(seen[0].init).get('Idempotency-Key')).toBe('deploy-42');
   });
 });
 
@@ -435,13 +455,15 @@ describe('index-status', () => {
   test('resolves the domain from the url, then reads the timeline', async () => {
     const originalFetch = global.fetch;
     const seen: string[] = [];
-    global.fetch = (async (url: string) => {
+    global.fetch = fakeFetch(async (url: string) => {
       seen.push(url);
+
       if (url.includes('/v1/settings/domains')) {
         return jsonResponse({ domains: [{ id: 'dom_1', domain: 'a.test' }] });
       }
+
       return jsonResponse({ url: 'https://a.test/', state: 'indexed', guidance: 'Nothing to do.' });
-    }) as unknown as typeof fetch;
+    });
 
     try {
       expect(await run(['index-status', 'https://a.test/', '--token', 't'])).toBe(0);
@@ -475,19 +497,21 @@ describe('the commands that need no token', () => {
     delete process.env.PAGERENDER_TOKEN;
     const originalFetch = global.fetch;
     const seen: string[] = [];
-    global.fetch = (async (url: string) => {
+    global.fetch = fakeFetch(async (url: string) => {
       seen.push(url);
+
       if (url.endsWith('/robots.txt')) {
         return new Response('User-agent: GPTBot\nDisallow: /\n', {
           status: 200,
           headers: { 'content-type': 'text/plain' },
         });
       }
+
       return new Response(
         '<html><head><title>T</title></head><body><p>one two three</p></body></html>',
         { status: 200, headers: { 'content-type': 'text/html' } },
       );
-    }) as unknown as typeof fetch;
+    });
 
     try {
       expect(await run(['analyze', 'https://a.test/', '--quiet'])).toBe(0);
@@ -495,6 +519,7 @@ describe('the commands that need no token', () => {
       expect(await run(['ai-crawlers', 'a.test', '--quiet'])).toBe(0);
     } finally {
       global.fetch = originalFetch;
+
       if (saved === undefined) delete process.env.PAGERENDER_TOKEN;
       else process.env.PAGERENDER_TOKEN = saved;
     }
@@ -506,17 +531,20 @@ describe('the commands that need no token', () => {
 
   test('both need a target, each named for what it takes', async () => {
     const errors: string[] = [];
-    const write = process.stderr.write.bind(process.stderr);
-    process.stderr.write = ((chunk: string) => {
+
+    const stderr = spyOn(process.stderr, 'write').mockImplementation((chunk) => {
       errors.push(String(chunk));
+
       return true;
-    }) as typeof process.stderr.write;
+    });
+
     try {
       expect(await run(['analyze-site'])).toBe(2);
       expect(await run(['ai-crawlers'])).toBe(2);
     } finally {
-      process.stderr.write = write;
+      stderr.mockRestore();
     }
+
     expect(errors[0]).toContain('needs a url');
     expect(errors[1]).toContain('needs a domain');
   });

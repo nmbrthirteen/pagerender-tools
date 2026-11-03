@@ -47,7 +47,7 @@ const result = analyzeHtml(await (await fetch('https://example.com')).text());
 | `good` | Everything else |
 
 `appShell` is true when a page carries a framework root element (`id="root"`,
-`id="__next"`, `id="app"`, `data-reactroot"`, `ng-version`, `id="__nuxt"`) and
+`id="__next"`, `id="app"`, `data-reactroot`, `ng-version`, `id="__nuxt"`) and
 almost no text around it. That is the shape a crawler sees on a site that builds
 its content in the browser.
 

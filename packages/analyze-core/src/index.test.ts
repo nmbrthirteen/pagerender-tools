@@ -1,7 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { analyzeHtml, countBodyWords, resolveLinks, stripTags } from './index.js';
+import {
+  agentsDisallowedSitewide,
+  analyzeHtml,
+  countBodyWords,
+  isAllowedByRobots,
+  parseRobotsTxt,
+  resolveLinks,
+  stripTags,
+} from './index.js';
 
 function fixture(name: string): string {
   return readFileSync(join(import.meta.dir, '..', 'fixtures', name), 'utf8');
@@ -12,6 +20,7 @@ function page(body: string, head = ''): string {
 }
 
 const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(' ');
+
 const links = (n: number) =>
   Array.from({ length: n }, (_, i) => `<a href="/p${i}">link</a>`).join('');
 
@@ -23,6 +32,7 @@ describe('verdict thresholds', () => {
         '<meta name="description" content="A real description">',
       ),
     );
+
     expect(result.verdict).toBe('good');
     expect(result.h1Count).toBe(1);
     expect(result.crawlableLinks).toBe(12);
@@ -37,6 +47,7 @@ describe('verdict thresholds', () => {
     const result = analyzeHtml(
       page(`<p>${words(400)}</p>${links(4)}`, '<meta name="description" content="d">'),
     );
+
     expect(result.verdict).toBe('partial');
   });
 
@@ -53,6 +64,7 @@ describe('verdict thresholds', () => {
         '<meta name="description" content="d"><meta name="robots" content="noindex, follow">',
       ),
     );
+
     expect(result.verdict).toBe('poor');
     expect(result.noindex).toBe(true);
   });
@@ -64,6 +76,7 @@ describe('verdict thresholds', () => {
         '<meta name="description" content="d">',
       ),
     );
+
     expect(result.appShell).toBe(false);
     expect(result.verdict).toBe('good');
   });
@@ -81,6 +94,7 @@ describe('extraction', () => {
     const result = analyzeHtml(
       page('<a href="/real">a</a><a href="#top">b</a><a href="javascript:void(0)">c</a>'),
     );
+
     expect(result.crawlableLinks).toBe(1);
     expect(result.jsLinks).toBe(2);
   });
@@ -93,6 +107,96 @@ describe('extraction', () => {
   test('script, style and template contents are not words', () => {
     expect(stripTags('<script>var a = 1</script><p>one two</p>')).toBe('one two');
     expect(countBodyWords('<body><style>a{b:c}</style><p>one two three</p></body>')).toBe(3);
+  });
+});
+
+describe('attribute parsing', () => {
+  test('reads unquoted href values', () => {
+    const result = analyzeHtml(page('<a href=/a>a</a><a href = /b >b</a>'));
+    expect(result.links).toEqual(['/a', '/b']);
+  });
+
+  test('data-href is not an href', () => {
+    const result = analyzeHtml(page('<a data-href="/c">c</a><a class="x" href=\'/d\'>d</a>'));
+    expect(result.links).toEqual(['/d']);
+    expect(result.jsLinks).toBe(1);
+  });
+
+  test('an href inside another attribute value is not an href', () => {
+    const result = analyzeHtml(page('<a title="see href=/x" href="/y">y</a>'));
+    expect(result.links).toEqual(['/y']);
+  });
+
+  test('reads unquoted meta attributes', () => {
+    const result = analyzeHtml(page('x', '<meta name=description content=x>'));
+    expect(result.metaDescription).toBe('x');
+  });
+
+  test('reads the robots meta with content before name', () => {
+    const result = analyzeHtml(page('x', '<meta content="noindex" name="robots">'));
+    expect(result.noindex).toBe(true);
+  });
+
+  test('a content value closes on its own quote', () => {
+    const double = analyzeHtml(page('x', `<meta name="description" content="Nika's shop">`));
+    expect(double.metaDescription).toBe("Nika's shop");
+    const single = analyzeHtml(page('x', `<meta content='Say "hi" to us' name='description'>`));
+    expect(single.metaDescription).toBe('Say "hi" to us');
+  });
+
+  test('reads an unquoted canonical', () => {
+    const result = analyzeHtml(page('x', '<link rel=canonical href=https://a.test/x>'));
+    expect(result.canonical).toBe('https://a.test/x');
+  });
+});
+
+describe('robots.txt', () => {
+  test('a wildcard Disallow: / blocks every AI crawler without its own group', () => {
+    const robots = 'User-agent: *\nDisallow: /\n';
+    expect(agentsDisallowedSitewide(robots, ['gptbot', 'claudebot'])).toEqual([
+      'gptbot',
+      'claudebot',
+    ]);
+  });
+
+  test('a crawler with its own group ignores the wildcard group', () => {
+    const robots = 'User-agent: *\nDisallow: /\n\nUser-agent: GPTBot\nAllow: /\n';
+    expect(agentsDisallowedSitewide(robots, ['gptbot', 'claudebot'])).toEqual(['claudebot']);
+  });
+
+  test('a crawler named in a group with Disallow: / is blocked', () => {
+    const robots = 'User-agent: GPTBot\nUser-agent: CCBot\nDisallow: /\n';
+    expect(agentsDisallowedSitewide(robots, ['gptbot', 'ccbot', 'claudebot'])).toEqual([
+      'gptbot',
+      'ccbot',
+    ]);
+  });
+
+  test('Disallow: /*? does not block a path without a query', () => {
+    const rules = parseRobotsTxt('User-agent: *\nDisallow: /*?\n');
+    expect(isAllowedByRobots('/about', rules)).toBe(true);
+    expect(isAllowedByRobots('/about?page=2', rules)).toBe(false);
+  });
+
+  test('Googlebot uses its own group alone when one exists', () => {
+    const robots = 'User-agent: *\nDisallow: /private\n\nUser-agent: Googlebot\nDisallow: /tmp\n';
+    const rules = parseRobotsTxt(robots);
+    expect(rules.disallow).toEqual(['/tmp']);
+    expect(isAllowedByRobots('/private', rules)).toBe(true);
+    expect(isAllowedByRobots('/tmp', rules)).toBe(false);
+  });
+
+  test('Googlebot falls back to the wildcard group', () => {
+    const rules = parseRobotsTxt('User-agent: *\nDisallow: /private\n');
+    expect(isAllowedByRobots('/private', rules)).toBe(false);
+  });
+
+  test('group selection works for any agent, and groups for one agent merge', () => {
+    const robots =
+      'User-agent: *\nDisallow: /a\n\nUser-agent: bingbot\nDisallow: /b\n\nUser-agent: BingBot\nDisallow: /c\n';
+
+    expect(parseRobotsTxt(robots, 'bingbot').disallow).toEqual(['/b', '/c']);
+    expect(parseRobotsTxt(robots, 'otherbot').disallow).toEqual(['/a']);
   });
 });
 

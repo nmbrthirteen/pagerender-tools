@@ -10,6 +10,11 @@
   ],
   "scripts": {
     "build": "npm run build -w packages/analyze-core && npm run build -w packages/cli && npm run build -w packages/mcp",
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "oxlint ."
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "1.78.0",
+    "oxlint": "1.78.0"
   }
 }
