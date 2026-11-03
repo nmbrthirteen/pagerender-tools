@@ -8,8 +8,10 @@ import {
   auditUrl,
   checkAiCrawlers,
   DEFAULT_API_URL,
+  normalizeHost,
   PagerenderClient,
   PagerenderError,
+  publicFetch,
 } from '@pagerender/cli';
 
 export { PagerenderError };
@@ -18,9 +20,7 @@ export const TOKEN_ENV_VAR = 'PAGERENDER_TOKEN';
 export const API_URL_ENV_VAR = 'PAGERENDER_API_URL';
 
 function packageVersion(): string {
-  return (
-    JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { version: string }
-  ).version;
+  return String(JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')).version);
 }
 
 export const TOOL_NAMES = [
@@ -43,7 +43,7 @@ export interface CreateServerOptions {
   fetchImpl?: typeof fetch;
 }
 
-function textResult(value: unknown): CallToolResult {
+function textResult<T>(value: T): CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
   };
@@ -56,17 +56,28 @@ function errorResult(message: string): CallToolResult {
   };
 }
 
-function describeError(err: unknown): CallToolResult {
+function describeError(err: Error): CallToolResult {
   if (err instanceof PagerenderError) {
     const parts = [`${err.code}: ${err.message}`];
+
     if (err.status === 429) {
       parts.push(
         'This is a rate limit. The client already waited out Retry-After once and retried. Wait before calling this tool again.',
       );
     }
+
     return errorResult(parts.join(' '));
   }
-  return errorResult(err instanceof Error ? err.message : String(err));
+
+  return errorResult(err.message);
+}
+
+async function guarded<T>(run: () => Promise<T>): Promise<CallToolResult> {
+  try {
+    return textResult(await run());
+  } catch (err) {
+    return describeError(err instanceof Error ? err : new Error(String(err)));
+  }
 }
 
 function tokenMissingMessage(toolName: string): string {
@@ -76,13 +87,14 @@ function tokenMissingMessage(toolName: string): string {
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const token = options.token ?? process.env[TOKEN_ENV_VAR];
   const apiUrl = options.apiUrl ?? process.env[API_URL_ENV_VAR] ?? DEFAULT_API_URL;
+
   const client = new PagerenderClient({
     token,
     apiUrl,
     fetchImpl: options.fetchImpl,
   });
 
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? publicFetch;
 
   const server = new McpServer({ name: 'pagerender', version: packageVersion() });
 
@@ -97,11 +109,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       },
     },
     async ({ url }) => {
-      try {
-        return textResult(await auditUrl(url, fetchImpl));
-      } catch (err) {
-        return describeError(err);
+      if (!normalizeHost(url)) {
+        return errorResult("That URL can't be checked. Use a public website address.");
       }
+
+      const target = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`;
+
+      return guarded(() => auditUrl(target, fetchImpl));
     },
   );
 
@@ -116,11 +130,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       },
     },
     async ({ url }) => {
-      try {
-        return textResult(await analyzeSite(url, { fetchImpl }));
-      } catch (err) {
-        return describeError(err);
-      }
+      return guarded(() => analyzeSite(url, { fetchImpl }));
     },
   );
 
@@ -135,11 +145,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       },
     },
     async ({ domain }) => {
-      try {
-        return textResult(await checkAiCrawlers(domain, { fetchImpl }));
-      } catch (err) {
-        return describeError(err);
-      }
+      return guarded(() => checkAiCrawlers(domain, { fetchImpl }));
     },
   );
 
@@ -155,11 +161,8 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     },
     async ({ url }) => {
       if (!token) return errorResult(tokenMissingMessage('verify_integration'));
-      try {
-        return textResult(await client.verify(url));
-      } catch (err) {
-        return describeError(err);
-      }
+
+      return guarded(() => client.verify(url));
     },
   );
 
@@ -176,11 +179,8 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     },
     async ({ period, domain }) => {
       if (!token) return errorResult(tokenMissingMessage('render_stats'));
-      try {
-        return textResult(await client.stats({ period, domain }));
-      } catch (err) {
-        return describeError(err);
-      }
+
+      return guarded(() => client.stats({ period, domain }));
     },
   );
 
@@ -192,11 +192,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         'Queue depth, cache and renderer health for the Pagerender service. Works with no token.',
     },
     async () => {
-      try {
-        return textResult(await client.health());
-      } catch (err) {
-        return describeError(err);
-      }
+      return guarded(() => client.health());
     },
   );
 
@@ -207,11 +203,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       description: 'Plans and prices published by Pagerender. Works with no token.',
     },
     async () => {
-      try {
-        return textResult(await client.plans());
-      } catch (err) {
-        return describeError(err);
-      }
+      return guarded(() => client.plans());
     },
   );
 
@@ -227,11 +219,8 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     },
     async ({ url }) => {
       if (!token) return errorResult(tokenMissingMessage('index_status'));
-      try {
-        return textResult(await client.urlTimeline(url));
-      } catch (err) {
-        return describeError(err);
-      }
+
+      return guarded(() => client.urlTimeline(url));
     },
   );
 
@@ -247,11 +236,8 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     },
     async ({ domain }) => {
       if (!token) return errorResult(tokenMissingMessage('indexing_overview'));
-      try {
-        return textResult(await client.indexingStatus(domain));
-      } catch (err) {
-        return describeError(err);
-      }
+
+      return guarded(() => client.indexingStatus(domain));
     },
   );
 

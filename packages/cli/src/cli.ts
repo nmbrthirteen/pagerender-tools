@@ -46,6 +46,7 @@ export function parseArgs(
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+
     if (!arg.startsWith('--')) {
       positional.push(arg);
       continue;
@@ -53,6 +54,7 @@ export function parseArgs(
 
     const body = arg.slice(2);
     const equals = body.indexOf('=');
+
     if (equals !== -1) {
       const name = body.slice(0, equals);
       const value = body.slice(equals + 1);
@@ -66,6 +68,7 @@ export function parseArgs(
     }
 
     const next = argv[index + 1];
+
     if (next !== undefined && !next.startsWith('--')) {
       flags[body] = next;
       index += 1;
@@ -89,11 +92,11 @@ Commands
                            robots.txt blocks.
   ai-crawlers <domain>     Which of 21 AI crawlers a domain's robots.txt blocks.
 
-  The four commands above, with audit, run on this machine and never call the
+  The three commands above, and audit, run on this machine and never call the
   Pagerender API. No token, no account, no rate limit.
   audit <url...>           Fetch each URL as Googlebot and report what a crawler
-                           sees. Runs on this machine, with no account and no
-                           limit. --sitemap <url> reads URLs from a sitemap,
+                           sees. Runs on this machine, with no account.
+                           --sitemap <url> reads URLs from a sitemap,
                            following a sitemap index one level. --file <path>
                            reads one URL per line. --concurrency <n> (4, max 16),
                            --limit <n> (500), --format <json|table>,
@@ -108,7 +111,7 @@ Commands
   purge <url...>           Drop cached renders. --pattern <glob> instead of urls.
   warmup <url...>          Pre-render URLs. --domain <host> or --sitemap <url>.
                            Each of these commands takes one target, not several.
-  stats                    Render statistics. --period <24h|7d|30d>, --domain <host>
+  stats                    Render statistics. --period <1h|24h|7d|30d|90d>, --domain <host>
   index <url...>           Queue URLs for the hourly indexing agent. Does not
                            spend quota itself. --file <path> reads one URL per
                            line instead of positional arguments.
@@ -145,12 +148,20 @@ function reportRateLimit(limit: RateLimit): void {
   );
 }
 
+function stringFlag(flags: Parsed['flags'], name: string): string | undefined {
+  const value: string | boolean | undefined = flags[name];
+
+  return value === undefined || value === true || value === false ? undefined : value;
+}
+
 function numberFlag(value: string | boolean | undefined, fallback: number, name: string): number {
-  if (typeof value !== 'string') return fallback;
+  if (value === undefined || value === true || value === false) return fallback;
   const parsed = Number.parseInt(value, 10);
+
   if (!Number.isFinite(parsed) || parsed < 1) {
     throw new UsageError(`--${name} takes a positive whole number.`);
   }
+
   return parsed;
 }
 
@@ -163,39 +174,43 @@ export async function run(argv: readonly string[]): Promise<number> {
 
   if (flags.version === true || command === 'version') {
     process.stdout.write(`${VERSION}\n`);
+
     return 0;
   }
 
   if (!command || flags.help || command === 'help') {
     process.stdout.write(HELP);
+
     return command ? 0 : 2;
   }
 
   const token =
-    typeof flags.token === 'string' ? flags.token : process.env.PAGERENDER_TOKEN;
+    stringFlag(flags, 'token') ?? process.env.PAGERENDER_TOKEN;
 
   if (NEEDS_TOKEN.has(command) && !token) {
     process.stderr.write(
       `pagerender ${command} needs a token. Set PAGERENDER_TOKEN or pass --token.\n`,
     );
+
     return 2;
   }
 
   const client = new PagerenderClient({
     token,
     apiUrl:
-      typeof flags.api === 'string'
-        ? flags.api
-        : process.env.PAGERENDER_API_URL ?? DEFAULT_API_URL,
+      stringFlag(flags, 'api') ?? process.env.PAGERENDER_API_URL ?? DEFAULT_API_URL,
     retryOnRateLimit: flags['no-retry'] !== true,
     onRateLimit: flags.quiet === true ? undefined : reportRateLimit,
   });
 
   const first = positional[0];
+
   const requireTarget = (noun = 'url'): string => {
     if (!first) throw new UsageError(`pagerender ${command} needs a ${noun}.`);
+
     return first;
   };
+
   const requireUrl = (): string => requireTarget();
 
   try {
@@ -218,48 +233,58 @@ export async function run(argv: readonly string[]): Promise<number> {
 
       case 'render': {
         const url = requireUrl();
+
         if (flags.html === true) {
           const html = await client.renderHtml(url, {
-            geo: typeof flags.geo === 'string' ? flags.geo : undefined,
+            geo: stringFlag(flags, 'geo'),
           });
+
           process.stdout.write(html.endsWith('\n') ? html : `${html}\n`);
+
           return 0;
         }
+
         return print(
           await client.render(url, {
-            geo: typeof flags.geo === 'string' ? flags.geo : undefined,
-            device: typeof flags.device === 'string' ? flags.device : undefined,
+            geo: stringFlag(flags, 'geo'),
+            device: stringFlag(flags, 'device'),
           }),
         );
       }
 
       case 'purge': {
-        const pattern = typeof flags.pattern === 'string' ? flags.pattern : undefined;
+        const pattern = stringFlag(flags, 'pattern');
         const urls = urlsFrom(positional);
+
         if (!pattern && urls.length === 0) {
           throw new UsageError('pagerender purge needs one or more urls, or --pattern.');
         }
+
         if (pattern && urls.length > 0) {
           throw new UsageError('pagerender purge takes urls or --pattern, not both.');
         }
+
         return print(await client.purge(pattern ? { pattern } : { urls }));
       }
 
       case 'warmup': {
-        const domain = typeof flags.domain === 'string' ? flags.domain : undefined;
-        const sitemapUrl = typeof flags.sitemap === 'string' ? flags.sitemap : undefined;
+        const domain = stringFlag(flags, 'domain');
+        const sitemapUrl = stringFlag(flags, 'sitemap');
         const urls = urlsFrom(positional);
         const targets = [domain, sitemapUrl, urls.length > 0 ? 'urls' : undefined];
+
         if (targets.every((target) => target === undefined)) {
           throw new UsageError(
             'pagerender warmup needs one or more urls, --domain, or --sitemap.',
           );
         }
+
         if (targets.filter((target) => target !== undefined).length > 1) {
           throw new UsageError(
             'pagerender warmup takes one of urls, --domain, or --sitemap.',
           );
         }
+
         return print(
           await client.warmup(
             domain ? { domain } : sitemapUrl ? { sitemapUrl } : { urls },
@@ -270,26 +295,31 @@ export async function run(argv: readonly string[]): Promise<number> {
       case 'stats':
         return print(
           await client.stats({
-            period: typeof flags.period === 'string' ? flags.period : undefined,
-            domain: typeof flags.domain === 'string' ? flags.domain : undefined,
+            period: stringFlag(flags, 'period'),
+            domain: stringFlag(flags, 'domain'),
           }),
         );
 
       case 'index': {
+        const listFile = stringFlag(flags, 'file');
+
         const fromFile =
-          typeof flags.file === 'string'
-            ? readFileSync(flags.file, 'utf8')
+          listFile !== undefined
+            ? readFileSync(listFile, 'utf8')
                 .split('\n')
                 .map((line) => line.trim())
                 .filter((line) => line.length > 0)
             : [];
+
         const urls = [...urlsFrom(positional), ...fromFile];
+
         if (urls.length === 0) {
           throw new UsageError('pagerender index needs one or more urls, or --file.');
         }
+
         return print(
           await client.requestIndexing(urls, {
-            idempotencyKey: typeof flags['idempotency-key'] === 'string' ? flags['idempotency-key'] : undefined,
+            idempotencyKey: stringFlag(flags, 'idempotency-key'),
           }),
         );
       }
@@ -298,31 +328,41 @@ export async function run(argv: readonly string[]): Promise<number> {
         return print(await client.urlTimeline(requireUrl()));
 
       case 'audit': {
-        const sitemap = typeof flags.sitemap === 'string' ? flags.sitemap : undefined;
-        const file = typeof flags.file === 'string' ? flags.file : undefined;
+        const sitemap = stringFlag(flags, 'sitemap');
+        const file = stringFlag(flags, 'file');
         const positionalUrls = urlsFrom(positional);
         const targets = [sitemap, file, positionalUrls.length > 0 ? 'urls' : undefined];
+
         if (targets.every((target) => target === undefined)) {
           throw new UsageError('pagerender audit needs one or more urls, --sitemap, or --file.');
         }
+
         if (targets.filter((target) => target !== undefined).length > 1) {
           throw new UsageError('pagerender audit takes one of urls, --sitemap, or --file.');
         }
 
         const limit = numberFlag(flags.limit, DEFAULT_LIMIT, 'limit');
+        const failedSitemaps: string[] = [];
+
         const urls = sitemap
-          ? await urlsFromSitemap(sitemap, fetch, limit)
+          ? await urlsFromSitemap(sitemap, fetch, limit, failedSitemaps)
           : file
             ? urlsFromFile(file)
             : positionalUrls;
+
         if (urls.length === 0) {
           throw new UsageError('pagerender audit found no urls to check.');
         }
 
-        const report = await audit(urls, {
+        const audited = await audit(urls, {
           limit,
           concurrency: numberFlag(flags.concurrency, DEFAULT_CONCURRENCY, 'concurrency'),
         });
+
+        const report =
+          failedSitemaps.length > 0
+            ? { ...audited, summary: { ...audited.summary, failedSitemaps: failedSitemaps.length } }
+            : audited;
 
         if (flags.format === 'table') {
           process.stdout.write(`${formatTable(report)}\n`);
@@ -330,40 +370,50 @@ export async function run(argv: readonly string[]): Promise<number> {
           process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
         }
 
-        const failOn = flags['fail-on'];
-        if (typeof failOn === 'string') {
+        const failOn = stringFlag(flags, 'fail-on');
+
+        if (failOn !== undefined) {
           if (failOn !== 'poor' && failOn !== 'partial') {
             throw new UsageError('--fail-on takes poor or partial.');
           }
+
           if (failsThreshold(report, failOn)) return 1;
         }
+
         return 0;
       }
 
       default:
         process.stderr.write(`pagerender: unknown command "${command}".\n\n${HELP}`);
+
         return 2;
     }
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(`${err.message}\n`);
+
       return 2;
     }
+
     if (err instanceof PagerenderError) {
       process.stdout.write(
         `${JSON.stringify({ error: { code: err.code, message: err.message }, status: err.status }, null, 2)}\n`,
       );
       process.stderr.write(`${err.code}: ${err.message}\n`);
+
       return 1;
     }
+
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+
     return 1;
   }
 }
 
 class UsageError extends Error {}
 
-function print(value: unknown): number {
+function print<T>(value: T): number {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+
   return 0;
 }

@@ -35,16 +35,13 @@ service itself. `verify_integration`, `render_stats`, `index_status` and
 | `index_status` | What happened to one URL in the indexing agent, its last Google verdict, and what the agent does next. | required |
 | `indexing_overview` | The indexing agent's last runs, recent decisions, finished-cohort index rate, quota and stalled patterns for one domain. | required |
 
-`analyze_url` is capped at 15 calls an hour per IP and needs no account, so it
-is the tool to try first.
-
 ## Configuration
 
 Two environment variables.
 
 - `PAGERENDER_TOKEN`: an API token, created under Settings in the dashboard.
   Required for `verify_integration`, `render_stats`, `index_status` and
-  `indexing_overview`, unused by the other three. See Authentication below for
+  `indexing_overview`, unused by the other five. See Authentication below for
   what it should be and where it lands.
 - `PAGERENDER_API_URL`: overrides the API base URL. Defaults to
   `https://api.pagerender.io`.
@@ -75,7 +72,7 @@ from Settings in the dashboard.
 ```
 
 Drop the `env` block for a client that only needs `analyze_url`,
-`service_health` and `list_plans`.
+`analyze_site`, `check_ai_crawlers`, `service_health` and `list_plans`.
 
 ### From source
 
@@ -109,5 +106,5 @@ import { createServer } from '@pagerender/mcp';
 const server = createServer({ token: process.env.PAGERENDER_TOKEN });
 ```
 
-`createServer` builds the `McpServer` and registers all seven tools. Call
+`createServer` builds the `McpServer` and registers all nine tools. Call
 `server.connect(transport)` with any MCP transport, stdio or otherwise.

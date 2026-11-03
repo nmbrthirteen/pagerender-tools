@@ -37,7 +37,7 @@ token either.
 
 ## Audit a whole sitemap, with no account
 
-`audit` is the one command that never calls the Pagerender API. It fetches each
+`audit` is one of four local commands that never call the Pagerender API. It fetches each
 page itself, as Googlebot, and runs the same analysis the hosted check runs.
 There is no token, no account and no rate limit.
 
@@ -80,7 +80,7 @@ ai-crawlers <domain>
                    Which of 21 AI crawlers a domain's robots.txt blocks.
                    No token.
 audit <url...>     Fetch each URL as Googlebot and report what a crawler sees.
-                   Runs on your machine. No token, no account, no limit.
+                   Runs on your machine. No token, no account, 500 URLs by default.
 health             Queue depth, cache and renderer health. No token.
 plans              Plans and prices. No token.
 openapi            The OpenAPI 3.1 document. No token.
@@ -88,7 +88,7 @@ render <url>       Render a URL. --html prints the HTML instead of the envelope.
 verify <url>       Confirm an integration is serving rendered HTML.
 purge <url...>     Drop cached renders. --pattern <glob> instead of urls.
 warmup <url...>    Pre-render URLs. --domain <host> or --sitemap <url>.
-stats              Render statistics. --period <24h|7d|30d>, --domain <host>
+stats              Render statistics. --period <1h|24h|7d|30d|90d>, --domain <host>
 index <url...>     Queue URLs for the hourly indexing agent. --file <path>
                    reads one URL per line, --idempotency-key <key> makes a
                    retry safe.
